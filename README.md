@@ -1,33 +1,17 @@
 # parquet-minio-trino-demo
 
-A hands-on demo showing how to query multiple Parquet files stored in MinIO using Trino. Hive Metastore holds the table metadata, Redis stores the schema definitions, and Trino runs the distributed SQL.
-
----
-
-## What this does
-
-You upload 2–3 Parquet files (sales, customers, products) to a MinIO bucket. Then you register them as Hive tables. Finally you run SQL through Trino — single selects, joins, and aggregations across all three files.
+Query 2-3 Parquet files stored in MinIO using Trino. Hive Metastore holds the table metadata, Postgres backs the metastore, and Trino runs the SQL. Everything runs as Docker containers.
 
 ---
 
 ## Stack
 
-| Component | Role |
-|---|---|
-| MinIO | S3-compatible object store, holds Parquet files |
-| Hive Metastore + PostgreSQL | Stores table metadata (schemas, locations) |
-| Redis | Stores Trino table schema JSON for Helm chart |
-| Trino | Runs SQL queries over Parquet data |
-| Kubernetes + Helm | Deploys everything locally |
-
----
-
-## Prerequisites
-
-- Docker Desktop (with Kubernetes enabled) or `kind`
-- `kubectl` and `helm` installed
-- `mc` (MinIO Client) installed
-- Python 3.x (to generate sample Parquet files)
+| Container | Image | Role |
+|---|---|---|
+| minio | minio/minio:latest | S3-compatible object store — holds Parquet files |
+| postgres | postgres:14 | Backend DB for Hive Metastore |
+| hive-metastore | apache/hive:3.1.3 | Stores table schemas and MinIO paths |
+| trino | trinodb/trino:435 | Distributed SQL engine — reads Parquet via Hive |
 
 ---
 
@@ -35,117 +19,170 @@ You upload 2–3 Parquet files (sales, customers, products) to a MinIO bucket. T
 
 ```
 parquet-minio-trino-demo/
-├── data/
-│   └── generate_parquet.py       # script to create sample parquet files
+├── docker-compose.yml
+├── trino/
+│   └── catalog/
+│       └── hive.properties      # Trino Hive catalog config
 ├── hive/
-│   └── create_tables.sql         # DDL to register tables in Hive
-├── k8s/
-│   ├── minio-values.yaml         # Helm values for MinIO
-│   ├── hive-metastore.yaml       # Hive Metastore deployment manifest
-│   ├── postgres.yaml             # PostgreSQL for Hive metadata
-│   ├── redis.yaml                # Redis deployment
-│   └── trino-values.yaml         # Helm values for Trino
+│   └── create_tables.sql        # DDL to register tables in Hive Metastore
+├── data/
+│   ├── generate_parquet.py      # generates sales, customers, products Parquet files
+│   └── output/                  # generated Parquet files (gitignored)
 ├── queries/
-│   └── demo_queries.sql          # SQL queries to run in Trino
-└── README.md
+│   └── demo_queries.sql         # SQL to run in Trino
+└── .gitignore
 ```
 
 ---
 
-## Setup steps
+## Prerequisites
 
-### 1. Generate sample Parquet files
+- Docker Desktop running (with Compose v2)
+- Python 3.x
+- `mc` (MinIO Client) — [install guide](https://min.io/docs/minio/linux/reference/minio-mc.html)
+
+---
+
+## Step 1 — Generate sample Parquet files
 
 ```bash
 cd data
 pip install pandas pyarrow
 python generate_parquet.py
+cd ..
 ```
 
-This creates `sales.parquet`, `customers.parquet`, `products.parquet` in `data/output/`.
+This creates three files in `data/output/`:
+- `sales.parquet` — order_id, customer_id, product_id, amount
+- `customers.parquet` — customer_id, name, city
+- `products.parquet` — product_id, name, category
 
-### 2. Deploy the stack
+---
+
+## Step 2 — Start all containers
 
 ```bash
-# MinIO
-helm repo add minio https://charts.min.io
-helm install minio minio/minio -f k8s/minio-values.yaml -n minio --create-namespace
-
-# PostgreSQL (backend for Hive Metastore)
-kubectl apply -f k8s/postgres.yaml -n hive
-
-# Hive Metastore
-kubectl apply -f k8s/hive-metastore.yaml -n hive
-
-# Redis
-kubectl apply -f k8s/redis.yaml -n trino
-
-# Trino
-helm repo add trino https://trinodb.github.io/charts
-helm install trino trino/trino -f k8s/trino-values.yaml -n trino
+docker compose up -d
 ```
 
-### 3. Upload Parquet files to MinIO
+Wait for all four containers to be healthy. Check with:
 
 ```bash
-# Port-forward MinIO
-kubectl port-forward svc/minio 9000:9000 -n minio
+docker compose ps
+```
 
-# Set up mc alias
+Expected: minio, postgres, hive-metastore, trino all running.
+
+---
+
+## Step 3 — Create MinIO bucket and upload Parquet files
+
+```bash
+# set up mc alias pointing at local MinIO
 mc alias set local http://localhost:9000 minioadmin minioadmin
 
-# Create bucket and upload
+# create the bucket
 mc mb local/demo-bucket
-mc cp data/output/sales.parquet      local/demo-bucket/data/sales/
-mc cp data/output/customers.parquet  local/demo-bucket/data/customers/
-mc cp data/output/products.parquet   local/demo-bucket/data/products/
+
+# upload each parquet file into its own directory
+mc cp data/output/sales.parquet     local/demo-bucket/data/sales/
+mc cp data/output/customers.parquet local/demo-bucket/data/customers/
+mc cp data/output/products.parquet  local/demo-bucket/data/products/
+
+# verify
+mc ls local/demo-bucket/data/
 ```
 
-### 4. Create Hive tables
+The paths here must exactly match the LOCATION values in `hive/create_tables.sql`.
 
-Exec into the Hive Metastore pod and run:
+---
+
+## Step 4 — Register Hive tables
+
+Exec into the Hive Metastore container and open beeline:
 
 ```bash
-kubectl exec -it deploy/hive-metastore -n hive -- beeline -u jdbc:hive2://localhost:10000
+docker exec -it hive-metastore beeline -u jdbc:hive2://localhost:10000
 ```
 
-Then paste the contents of `hive/create_tables.sql`.
+Paste and run the SQL from `hive/create_tables.sql`.
 
-### 5. Query with Trino
+Or run it directly in one shot:
 
 ```bash
-# Port-forward Trino
-kubectl port-forward svc/trino 8080:8080 -n trino
-
-# Open Trino UI
-open http://localhost:8080
-
-# Or connect via CLI
-trino --server localhost:8080 --catalog hive --schema demo
+docker exec -i hive-metastore beeline -u jdbc:hive2://localhost:10000 < hive/create_tables.sql
 ```
 
-Run queries from `queries/demo_queries.sql`.
+---
+
+## Step 5 — Query with Trino
+
+Open the Trino UI in your browser: [http://localhost:8080](http://localhost:8080)
+
+Or connect with the Trino CLI:
+
+```bash
+docker exec -it trino trino --catalog hive --schema demo
+```
+
+Run the queries from `queries/demo_queries.sql`.
+
+Quick check:
+
+```sql
+SELECT * FROM hive.demo.sales LIMIT 10;
+```
+
+Join two Parquet-backed tables:
+
+```sql
+SELECT c.name, c.city, s.amount
+FROM hive.demo.sales s
+JOIN hive.demo.customers c ON s.customer_id = c.customer_id
+WHERE s.amount > 1000;
+```
+
+Three-way join across all three Parquet files:
+
+```sql
+SELECT c.name AS customer, p.name AS product, p.category, s.amount
+FROM hive.demo.sales s
+JOIN hive.demo.customers c ON s.customer_id = c.customer_id
+JOIN hive.demo.products  p ON s.product_id  = p.product_id
+ORDER BY s.amount DESC;
+```
+
+---
+
+## Tear down
+
+```bash
+docker compose down -v
+```
+
+The `-v` flag removes the named volumes (MinIO data and Postgres data) so you start fresh next time.
 
 ---
 
 ## Troubleshooting
 
 **Trino can't reach MinIO**  
-Check `hive.s3.endpoint` in `trino-values.yaml`. It must point to the MinIO ClusterIP service.
+Check `hive.s3.endpoint` in `trino/catalog/hive.properties`. It must be `http://minio:9000` (container name, not localhost).
 
-**Hive table location mismatch**  
-Make sure the `LOCATION` in `create_tables.sql` exactly matches the bucket path you used in `mc cp`.
+**Hive table LOCATION mismatch**  
+The `s3a://demo-bucket/data/sales/` path in `create_tables.sql` must match exactly what you used in `mc cp`.
 
-**Authentication error on MinIO**  
-Verify `hive.s3.aws-access-key` and `hive.s3.aws-secret-key` match what's in `minio-values.yaml`.
+**Hive Metastore keeps restarting**  
+Make sure Postgres is fully up before Hive starts. The `depends_on + healthcheck` in the compose file handles this but if it fails run `docker compose restart hive-metastore`.
 
-**Parquet schema mismatch**  
-If you edit the Python script, regenerate the Parquet files before re-creating Hive tables.
+**Port 8080 already in use**  
+Change the Trino port in `docker-compose.yml` from `8080:8080` to e.g. `8888:8080` and adjust accordingly.
 
 ---
 
 ## Reference
 
-- [Deploy MinIO and Trino with Kubernetes](https://www.min.io/blog/minio-trino-kubernetes)
+- [Deploy MinIO and Trino with Kubernetes](https://www.min.io/blog/minio-trino-kubernetes) — original reference
 - [Trino Hive connector docs](https://trino.io/docs/current/connector/hive.html)
 - [MinIO Client (mc) quickstart](https://min.io/docs/minio/linux/reference/minio-mc.html)
+- [trinodb/trino Docker image](https://hub.docker.com/r/trinodb/trino)
