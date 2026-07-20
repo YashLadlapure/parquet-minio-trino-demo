@@ -1,6 +1,7 @@
--- Run these inside Trino CLI:
--- docker exec -it trino trino
--- OR on Windows: Get-Content hive\create_tables.sql | docker exec -i trino trino
+-- Run inside Trino CLI:
+--   docker exec -it trino trino
+-- OR on Windows PowerShell:
+--   Get-Content hive\create_tables.sql | docker exec -i trino trino
 
 CREATE SCHEMA IF NOT EXISTS hive.demo
 WITH (location = 's3a://demo-bucket/data/');

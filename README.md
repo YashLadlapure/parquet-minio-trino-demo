@@ -1,6 +1,6 @@
 # parquet-minio-trino-demo
 
-Query 2-3 Parquet files stored in MinIO using Trino. Hive Metastore holds the table metadata, Postgres backs the metastore, and Trino runs the SQL. Everything runs as Docker containers.
+Query multiple Parquet files stored in MinIO using Trino. No Hive Metastore required — Trino’s Hive connector registers external tables that point directly at Parquet files on MinIO.
 
 ---
 
@@ -9,11 +9,7 @@ Query 2-3 Parquet files stored in MinIO using Trino. Hive Metastore holds the ta
 | Container | Image | Port | Role |
 |---|---|---|---|
 | minio | minio/minio:latest | 9000, 9001 | S3-compatible object store — holds Parquet files |
-| postgres | postgres:14 | — | Backend DB for Hive Metastore (DB name: `metastore`) |
-| hive-metastore | naushadh/hive-metastore:latest | 9083 | Standalone Hive Metastore (thrift) backed by Postgres |
-| trino | trinodb/trino:435 | 8080 | Distributed SQL engine — reads Parquet via Hive |
-
-> Note: HiveServer2 is not needed. Trino connects directly to the Hive Metastore thrift service on port 9083. Tables are registered directly via Trino SQL.
+| trino | trinodb/trino:435 | 8080 | Distributed SQL engine — reads Parquet via Hive connector |
 
 ---
 
@@ -24,15 +20,15 @@ parquet-minio-trino-demo/
 ├── docker-compose.yml
 ├── trino/
 │   └── catalog/
-│       └── hive.properties          # Trino Hive catalog config
+│       └── hive.properties          # Trino Hive catalog — points at MinIO
 ├── hive/
-│   └── create_tables.sql          # DDL to run inside Trino CLI
+│   └── create_tables.sql          # Trino DDL to register external Parquet tables
 ├── data/
-│   ├── generate_parquet.py        # Step 1: generates sample Parquet files
-│   ├── upload_to_minio.py         # Step 3: uploads files into MinIO
+│   ├── generate_parquet.py        # Step 1: generate sample Parquet files
+│   ├── upload_to_minio.py         # Step 3: upload Parquet files to MinIO bucket
 │   └── output/                    # generated Parquet files (gitignored)
 ├── queries/
-│   └── demo_queries.sql           # SQL to run in Trino
+│   └── demo_queries.sql           # SQL joins to run in Trino
 └── .gitignore
 ```
 
@@ -61,21 +57,14 @@ This creates three files in `data/output/`:
 
 ---
 
-## Step 2 — Start all containers
+## Step 2 — Start containers
 
 ```bash
 docker compose up -d
-```
-
-Wait for all containers to be healthy:
-
-```bash
 docker compose ps
 ```
 
-Expected: minio, postgres, hive-metastore, trino all `running`.
-
-> hive-metastore initializes the Postgres schema on first start. Takes ~30 seconds.
+Expected: `minio` and `trino` both `running`.
 
 ---
 
@@ -90,17 +79,22 @@ cd ..
 
 Verify in MinIO console: [http://localhost:9001](http://localhost:9001) — login `minioadmin / minioadmin`
 
+You should see `demo-bucket` with three prefixes:
+- `data/sales/`
+- `data/customers/`
+- `data/products/`
+
 ---
 
 ## Step 4 — Register Hive tables via Trino
 
-No beeline needed. Connect to Trino and run the DDL directly:
+Connect to Trino CLI:
 
 ```bash
 docker exec -it trino trino
 ```
 
-Then paste the contents of `hive/create_tables.sql`:
+Paste (or pipe in) the contents of `hive/create_tables.sql`:
 
 ```sql
 CREATE SCHEMA IF NOT EXISTS hive.demo
@@ -138,16 +132,10 @@ WITH (
 );
 ```
 
-Or run directly without entering the shell:
+Or pipe directly on Windows:
 
-**Windows (PowerShell):**
 ```powershell
 Get-Content hive\create_tables.sql | docker exec -i trino trino
-```
-
-**Mac/Linux:**
-```bash
-docker exec -i trino trino < hive/create_tables.sql
 ```
 
 ---
@@ -162,7 +150,7 @@ Connect via CLI:
 docker exec -it trino trino
 ```
 
-Quick checks:
+Basic checks:
 
 ```sql
 SELECT * FROM hive.demo.sales LIMIT 10;
@@ -179,10 +167,14 @@ JOIN hive.demo.customers c ON s.customer_id = c.customer_id
 WHERE s.amount > 1000;
 ```
 
-Three-way join:
+Three-way join across all three Parquet files:
 
 ```sql
-SELECT c.name AS customer, p.name AS product, p.category, s.amount
+SELECT
+  c.name     AS customer,
+  p.name     AS product,
+  p.category AS category,
+  s.amount   AS amount
 FROM hive.demo.sales s
 JOIN hive.demo.customers c ON s.customer_id = c.customer_id
 JOIN hive.demo.products  p ON s.product_id  = p.product_id
@@ -199,16 +191,37 @@ docker compose down -v
 
 ---
 
+## How it works
+
+```
+Parquet files
+    │
+    ▼
+  MinIO (S3-compatible object store)
+    │  s3a://demo-bucket/data/sales/
+    │  s3a://demo-bucket/data/customers/
+    │  s3a://demo-bucket/data/products/
+    │
+    ▼
+  Trino (Hive connector)
+    │  external tables point at MinIO paths
+    │  reads Parquet files directly
+    │
+    ▼
+  SQL joins across 3 Parquet-backed tables
+```
+
+Trino’s Hive connector stores external table metadata in memory (no running Hive process needed for this demo). It reads the Parquet column statistics and data directly from MinIO using the S3A protocol.
+
+---
+
 ## Troubleshooting
 
-**hive-metastore crashes on startup**  
-Make sure you ran `docker compose down -v` to clear old Postgres volumes before restarting.
+**`upload_to_minio.py` connection refused**  
+Make sure `docker compose up -d` is complete and MinIO is healthy before uploading.
 
-**Trino can't reach MinIO**  
-Check `hive.s3.endpoint` in `trino/catalog/hive.properties`. It must be `http://minio:9000`.
-
-**Hive table LOCATION mismatch**  
-The `s3a://demo-bucket/data/sales` path in `create_tables.sql` must match the object path from the upload script.
+**`CREATE SCHEMA` or `CREATE TABLE` fails in Trino**  
+Check `trino/catalog/hive.properties` — `hive.s3.endpoint` must be `http://minio:9000` and `hive.metastore` must be set to `file` or not require a running thrift service.
 
 **Port 8080 already in use**  
 Change `8080:8080` to `8888:8080` in `docker-compose.yml`.
@@ -218,6 +231,5 @@ Change `8080:8080` to `8888:8080` in `docker-compose.yml`.
 ## Reference
 
 - [Trino Hive connector docs](https://trino.io/docs/current/connector/hive.html)
-- [naushadh/hive-metastore Docker image](https://hub.docker.com/r/naushadh/hive-metastore)
 - [MinIO Python SDK](https://min.io/docs/minio/linux/developers/python/minio-py.html)
 - [trinodb/trino Docker image](https://hub.docker.com/r/trinodb/trino)

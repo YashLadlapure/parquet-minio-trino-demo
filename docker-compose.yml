@@ -22,56 +22,11 @@ services:
       timeout: 5s
       retries: 5
 
-  postgres:
-    image: postgres:14
-    container_name: postgres
-    environment:
-      POSTGRES_USER: hive
-      POSTGRES_PASSWORD: hive
-      POSTGRES_DB: metastore
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    networks:
-      - trino-net
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  hive-metastore:
-    image: naushadh/hive-metastore:latest
-    container_name: hive-metastore
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      DATABASE_HOST: postgres
-      DATABASE_PORT: 5432
-      DATABASE_DB: metastore
-      DATABASE_USER: hive
-      DATABASE_PASSWORD: hive
-      S3_ENDPOINT_URL: http://minio:9000
-      S3_ACCESS_KEY: minioadmin
-      S3_SECRET_KEY: minioadmin
-      S3_BUCKET: demo-bucket
-      S3_PREFIX: warehouse
-    ports:
-      - "9083:9083"
-    networks:
-      - trino-net
-    healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 9083"]
-      interval: 15s
-      timeout: 10s
-      retries: 10
-      start_period: 60s
-
   trino:
     image: trinodb/trino:435
     container_name: trino
     depends_on:
-      hive-metastore:
+      minio:
         condition: service_healthy
     ports:
       - "8080:8080"
@@ -82,7 +37,6 @@ services:
 
 volumes:
   minio_data:
-  postgres_data:
 
 networks:
   trino-net:
