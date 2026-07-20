@@ -22,14 +22,15 @@ parquet-minio-trino-demo/
 ├── docker-compose.yml
 ├── trino/
 │   └── catalog/
-│       └── hive.properties      # Trino Hive catalog config
+│       └── hive.properties          # Trino Hive catalog config
 ├── hive/
-│   └── create_tables.sql        # DDL to register tables in Hive Metastore
+│   └── create_tables.sql          # DDL to register tables in Hive Metastore
 ├── data/
-│   ├── generate_parquet.py      # generates sales, customers, products Parquet files
-│   └── output/                  # generated Parquet files (gitignored)
+│   ├── generate_parquet.py        # Step 1: generates sales, customers, products Parquet files
+│   ├── upload_to_minio.py         # Step 3: uploads Parquet files directly into MinIO bucket
+│   └── output/                    # generated Parquet files (gitignored)
 ├── queries/
-│   └── demo_queries.sql         # SQL to run in Trino
+│   └── demo_queries.sql           # SQL to run in Trino
 └── .gitignore
 ```
 
@@ -39,7 +40,8 @@ parquet-minio-trino-demo/
 
 - Docker Desktop running (with Compose v2)
 - Python 3.x
-- `mc` (MinIO Client) — [install guide](https://min.io/docs/minio/linux/reference/minio-mc.html)
+
+No `mc` or other external tools needed.
 
 ---
 
@@ -65,61 +67,63 @@ This creates three files in `data/output/`:
 docker compose up -d
 ```
 
-Wait for all four containers to be healthy. Check with:
+Wait for all four containers to be healthy:
 
 ```bash
 docker compose ps
 ```
 
-Expected: minio, postgres, hive-metastore, trino all running.
+Expected: minio, postgres, hive-metastore, trino all `running`.
 
 ---
 
-## Step 3 — Create MinIO bucket and upload Parquet files
+## Step 3 — Upload Parquet files to MinIO (Python)
+
+No `mc.exe` needed. Run the uploader script directly:
 
 ```bash
-# set up mc alias pointing at local MinIO
-mc alias set local http://localhost:9000 minioadmin minioadmin
-
-# create the bucket
-mc mb local/demo-bucket
-
-# upload each parquet file into its own directory
-mc cp data/output/sales.parquet     local/demo-bucket/data/sales/
-mc cp data/output/customers.parquet local/demo-bucket/data/customers/
-mc cp data/output/products.parquet  local/demo-bucket/data/products/
-
-# verify
-mc ls local/demo-bucket/data/
+cd data
+pip install minio
+python upload_to_minio.py
+cd ..
 ```
 
-The paths here must exactly match the LOCATION values in `hive/create_tables.sql`.
+This creates `demo-bucket` in MinIO and uploads all three Parquet files into:
+- `data/sales/sales.parquet`
+- `data/customers/customers.parquet`
+- `data/products/products.parquet`
+
+Verify in MinIO console: [http://localhost:9001](http://localhost:9001) — login `minioadmin / minioadmin`
 
 ---
 
 ## Step 4 — Register Hive tables
 
-Exec into the Hive Metastore container and open beeline:
+**Windows (PowerShell):**
 
-```bash
-docker exec -it hive-metastore beeline -u jdbc:hive2://localhost:10000
+```powershell
+Get-Content hive\create_tables.sql | docker exec -i hive-metastore beeline -u jdbc:hive2://localhost:10000
 ```
 
-Paste and run the SQL from `hive/create_tables.sql`.
-
-Or run it directly in one shot:
+**Mac/Linux:**
 
 ```bash
 docker exec -i hive-metastore beeline -u jdbc:hive2://localhost:10000 < hive/create_tables.sql
+```
+
+Verify tables are registered:
+
+```bash
+docker exec -it hive-metastore beeline -u jdbc:hive2://localhost:10000 -e "SHOW TABLES IN demo;"
 ```
 
 ---
 
 ## Step 5 — Query with Trino
 
-Open the Trino UI in your browser: [http://localhost:8080](http://localhost:8080)
+Open Trino UI: [http://localhost:8080](http://localhost:8080)
 
-Or connect with the Trino CLI:
+Connect via CLI:
 
 ```bash
 docker exec -it trino trino --catalog hive --schema demo
@@ -160,23 +164,26 @@ ORDER BY s.amount DESC;
 docker compose down -v
 ```
 
-The `-v` flag removes the named volumes (MinIO data and Postgres data) so you start fresh next time.
+The `-v` flag removes the named volumes so you start fresh next time.
 
 ---
 
 ## Troubleshooting
 
+**`upload_to_minio.py` connection refused**  
+Make sure `docker compose up -d` is running and MinIO is healthy before running the upload script.
+
 **Trino can't reach MinIO**  
 Check `hive.s3.endpoint` in `trino/catalog/hive.properties`. It must be `http://minio:9000` (container name, not localhost).
 
 **Hive table LOCATION mismatch**  
-The `s3a://demo-bucket/data/sales/` path in `create_tables.sql` must match exactly what you used in `mc cp`.
+The `s3a://demo-bucket/data/sales/` path in `create_tables.sql` must match the object path used in the upload script.
 
 **Hive Metastore keeps restarting**  
-Make sure Postgres is fully up before Hive starts. The `depends_on + healthcheck` in the compose file handles this but if it fails run `docker compose restart hive-metastore`.
+Run `docker compose restart hive-metastore` after Postgres is fully up.
 
 **Port 8080 already in use**  
-Change the Trino port in `docker-compose.yml` from `8080:8080` to e.g. `8888:8080` and adjust accordingly.
+Change `8080:8080` to `8888:8080` in `docker-compose.yml`.
 
 ---
 
@@ -184,5 +191,5 @@ Change the Trino port in `docker-compose.yml` from `8080:8080` to e.g. `8888:808
 
 - [Deploy MinIO and Trino with Kubernetes](https://www.min.io/blog/minio-trino-kubernetes) — original reference
 - [Trino Hive connector docs](https://trino.io/docs/current/connector/hive.html)
-- [MinIO Client (mc) quickstart](https://min.io/docs/minio/linux/reference/minio-mc.html)
+- [MinIO Python SDK](https://min.io/docs/minio/linux/developers/python/minio-py.html)
 - [trinodb/trino Docker image](https://hub.docker.com/r/trinodb/trino)
