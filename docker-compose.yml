@@ -32,11 +32,13 @@ services:
       - "8080:8080"
     volumes:
       - ./trino/catalog:/etc/trino/catalog
+      - trino_hive_data:/etc/trino/catalog/hive-data
     networks:
       - trino-net
 
 volumes:
   minio_data:
+  trino_hive_data:
 
 networks:
   trino-net:
