@@ -40,58 +40,39 @@ services:
       retries: 5
 
   hive-metastore:
-    image: apache/hive:3.1.3
+    image: naushadh/hive-metastore:latest
     container_name: hive-metastore
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      SERVICE_NAME: metastore
-      SKIP_SCHEMA_INIT: "false"
-      # Tell the entrypoint to skip its own env-based config injection
-      # and use our mounted hive-site.xml directly
-      DB_DRIVER: postgres
-      AWS_ACCESS_KEY_ID: minioadmin
-      AWS_SECRET_ACCESS_KEY: minioadmin
-    volumes:
-      - ./hive/hive-site.xml:/opt/hive/conf/hive-site.xml
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_DB: metastore
+      DATABASE_USER: hive
+      DATABASE_PASSWORD: hive
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_BUCKET: demo-bucket
+      S3_PREFIX: warehouse
     ports:
       - "9083:9083"
     networks:
       - trino-net
-    command: ["hive", "--service", "metastore"]
     healthcheck:
-      test: ["CMD-SHELL", "ss -tnlp | grep 9083 || netstat -tnlp 2>/dev/null | grep 9083"]
+      test: ["CMD-SHELL", "nc -z localhost 9083"]
       interval: 15s
       timeout: 10s
       retries: 10
-      start_period: 90s
-
-  hiveserver2:
-    image: apache/hive:3.1.3
-    container_name: hiveserver2
-    depends_on:
-      hive-metastore:
-        condition: service_healthy
-    environment:
-      SERVICE_NAME: hiveserver2
-      DB_DRIVER: postgres
-      AWS_ACCESS_KEY_ID: minioadmin
-      AWS_SECRET_ACCESS_KEY: minioadmin
-    volumes:
-      - ./hive/hive-site.xml:/opt/hive/conf/hive-site.xml
-    ports:
-      - "10000:10000"
-      - "10002:10002"
-    networks:
-      - trino-net
-    command: ["hive", "--service", "hiveserver2"]
+      start_period: 60s
 
   trino:
     image: trinodb/trino:435
     container_name: trino
     depends_on:
-      - hive-metastore
+      hive-metastore:
+        condition: service_healthy
     ports:
       - "8080:8080"
     volumes:

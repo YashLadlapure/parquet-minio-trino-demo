@@ -10,9 +10,10 @@ Query 2-3 Parquet files stored in MinIO using Trino. Hive Metastore holds the ta
 |---|---|---|---|
 | minio | minio/minio:latest | 9000, 9001 | S3-compatible object store — holds Parquet files |
 | postgres | postgres:14 | — | Backend DB for Hive Metastore (DB name: `metastore`) |
-| hive-metastore | apache/hive:3.1.3 | 9083 | Thrift metastore service — stores table schemas |
-| hiveserver2 | apache/hive:3.1.3 | 10000 | HiveServer2 — accepts beeline SQL connections |
+| hive-metastore | naushadh/hive-metastore:latest | 9083 | Standalone Hive Metastore (thrift) backed by Postgres |
 | trino | trinodb/trino:435 | 8080 | Distributed SQL engine — reads Parquet via Hive |
+
+> Note: HiveServer2 is not needed. Trino connects directly to the Hive Metastore thrift service on port 9083. Tables are registered directly via Trino SQL.
 
 ---
 
@@ -25,10 +26,10 @@ parquet-minio-trino-demo/
 │   └── catalog/
 │       └── hive.properties          # Trino Hive catalog config
 ├── hive/
-│   └── create_tables.sql          # DDL to register tables in Hive Metastore
+│   └── create_tables.sql          # DDL to run inside Trino CLI
 ├── data/
-│   ├── generate_parquet.py        # Step 1: generates sales, customers, products Parquet files
-│   ├── upload_to_minio.py         # Step 3: uploads Parquet files into MinIO bucket
+│   ├── generate_parquet.py        # Step 1: generates sample Parquet files
+│   ├── upload_to_minio.py         # Step 3: uploads files into MinIO
 │   └── output/                    # generated Parquet files (gitignored)
 ├── queries/
 │   └── demo_queries.sql           # SQL to run in Trino
@@ -41,8 +42,6 @@ parquet-minio-trino-demo/
 
 - Docker Desktop running (with Compose v2)
 - Python 3.x
-
-No `mc` or other external tools needed.
 
 ---
 
@@ -68,19 +67,19 @@ This creates three files in `data/output/`:
 docker compose up -d
 ```
 
-Wait for all containers to be healthy. Check with:
+Wait for all containers to be healthy:
 
 ```bash
 docker compose ps
 ```
 
-Expected: minio, postgres, hive-metastore, hiveserver2, trino all `running`.
+Expected: minio, postgres, hive-metastore, trino all `running`.
 
-> **Note:** hive-metastore takes ~60 seconds on first start to initialize the Postgres schema. hiveserver2 waits until hive-metastore is healthy before starting.
+> hive-metastore initializes the Postgres schema on first start. Takes ~30 seconds.
 
 ---
 
-## Step 3 — Upload Parquet files to MinIO (Python)
+## Step 3 — Upload Parquet files to MinIO
 
 ```bash
 cd data
@@ -93,26 +92,62 @@ Verify in MinIO console: [http://localhost:9001](http://localhost:9001) — logi
 
 ---
 
-## Step 4 — Register Hive tables
+## Step 4 — Register Hive tables via Trino
 
-Wait for hiveserver2 to be ready (check `docker compose ps` shows it running), then run:
+No beeline needed. Connect to Trino and run the DDL directly:
+
+```bash
+docker exec -it trino trino
+```
+
+Then paste the contents of `hive/create_tables.sql`:
+
+```sql
+CREATE SCHEMA IF NOT EXISTS hive.demo
+WITH (location = 's3a://demo-bucket/data/');
+
+CREATE TABLE IF NOT EXISTS hive.demo.sales (
+  order_id    BIGINT,
+  customer_id BIGINT,
+  product_id  BIGINT,
+  amount      DOUBLE
+)
+WITH (
+  external_location = 's3a://demo-bucket/data/sales',
+  format = 'PARQUET'
+);
+
+CREATE TABLE IF NOT EXISTS hive.demo.customers (
+  customer_id BIGINT,
+  name        VARCHAR,
+  city        VARCHAR
+)
+WITH (
+  external_location = 's3a://demo-bucket/data/customers',
+  format = 'PARQUET'
+);
+
+CREATE TABLE IF NOT EXISTS hive.demo.products (
+  product_id BIGINT,
+  name       VARCHAR,
+  category   VARCHAR
+)
+WITH (
+  external_location = 's3a://demo-bucket/data/products',
+  format = 'PARQUET'
+);
+```
+
+Or run directly without entering the shell:
 
 **Windows (PowerShell):**
-
 ```powershell
-Get-Content hive\create_tables.sql | docker exec -i hiveserver2 beeline -u jdbc:hive2://localhost:10000/default
+Get-Content hive\create_tables.sql | docker exec -i trino trino
 ```
 
 **Mac/Linux:**
-
 ```bash
-docker exec -i hiveserver2 beeline -u jdbc:hive2://localhost:10000/default < hive/create_tables.sql
-```
-
-Verify tables are registered:
-
-```bash
-docker exec -it hiveserver2 beeline -u jdbc:hive2://localhost:10000/default -e "SHOW TABLES IN demo;"
+docker exec -i trino trino < hive/create_tables.sql
 ```
 
 ---
@@ -124,13 +159,15 @@ Open Trino UI: [http://localhost:8080](http://localhost:8080)
 Connect via CLI:
 
 ```bash
-docker exec -it trino trino --catalog hive --schema demo
+docker exec -it trino trino
 ```
 
-Quick check:
+Quick checks:
 
 ```sql
 SELECT * FROM hive.demo.sales LIMIT 10;
+SELECT * FROM hive.demo.customers LIMIT 10;
+SELECT * FROM hive.demo.products LIMIT 10;
 ```
 
 Join two Parquet-backed tables:
@@ -142,7 +179,7 @@ JOIN hive.demo.customers c ON s.customer_id = c.customer_id
 WHERE s.amount > 1000;
 ```
 
-Three-way join across all three Parquet files:
+Three-way join:
 
 ```sql
 SELECT c.name AS customer, p.name AS product, p.category, s.amount
@@ -160,29 +197,18 @@ ORDER BY s.amount DESC;
 docker compose down -v
 ```
 
-The `-v` flag removes the named volumes so you start fresh next time.
-
 ---
 
 ## Troubleshooting
 
-**`database "hive" does not exist` in Postgres logs**  
-This was caused by the old `pg_isready` healthcheck not specifying `-d metastore`. Fixed in this version — the healthcheck now uses `pg_isready -U hive -d metastore`.
-
-**`upload_to_minio.py` connection refused**  
-Make sure `docker compose up -d` is running and MinIO is healthy before uploading.
-
-**beeline connection refused on port 10000**  
-hiveserver2 takes ~90 seconds to start after hive-metastore is healthy. Run `docker logs hiveserver2` and wait for `Started HiveServer2` in the logs before running beeline.
+**hive-metastore crashes on startup**  
+Make sure you ran `docker compose down -v` to clear old Postgres volumes before restarting.
 
 **Trino can't reach MinIO**  
-Check `hive.s3.endpoint` in `trino/catalog/hive.properties`. It must be `http://minio:9000` (container name, not localhost).
+Check `hive.s3.endpoint` in `trino/catalog/hive.properties`. It must be `http://minio:9000`.
 
 **Hive table LOCATION mismatch**  
-The `s3a://demo-bucket/data/sales/` path in `create_tables.sql` must match the object path used in the upload script.
-
-**Hive Metastore keeps restarting**  
-Run `docker compose restart hive-metastore` after Postgres is fully up.
+The `s3a://demo-bucket/data/sales` path in `create_tables.sql` must match the object path from the upload script.
 
 **Port 8080 already in use**  
 Change `8080:8080` to `8888:8080` in `docker-compose.yml`.
@@ -192,6 +218,6 @@ Change `8080:8080` to `8888:8080` in `docker-compose.yml`.
 ## Reference
 
 - [Trino Hive connector docs](https://trino.io/docs/current/connector/hive.html)
-- [Apache Hive Docker quickstart](https://hive.apache.org/developement/quickstart/)
+- [naushadh/hive-metastore Docker image](https://hub.docker.com/r/naushadh/hive-metastore)
 - [MinIO Python SDK](https://min.io/docs/minio/linux/developers/python/minio-py.html)
 - [trinodb/trino Docker image](https://hub.docker.com/r/trinodb/trino)

@@ -1,29 +1,37 @@
-CREATE DATABASE IF NOT EXISTS demo;
+-- Run these inside Trino CLI:
+-- docker exec -it trino trino
+-- OR on Windows: Get-Content hive\create_tables.sql | docker exec -i trino trino
 
--- sales table pointing to the sales parquet files in MinIO
-CREATE TABLE IF NOT EXISTS demo.sales (
+CREATE SCHEMA IF NOT EXISTS hive.demo
+WITH (location = 's3a://demo-bucket/data/');
+
+CREATE TABLE IF NOT EXISTS hive.demo.sales (
   order_id    BIGINT,
   customer_id BIGINT,
   product_id  BIGINT,
   amount      DOUBLE
 )
-STORED AS PARQUET
-LOCATION 's3a://demo-bucket/data/sales/';
+WITH (
+  external_location = 's3a://demo-bucket/data/sales',
+  format = 'PARQUET'
+);
 
--- customers table
-CREATE TABLE IF NOT EXISTS demo.customers (
+CREATE TABLE IF NOT EXISTS hive.demo.customers (
   customer_id BIGINT,
-  name        STRING,
-  city        STRING
+  name        VARCHAR,
+  city        VARCHAR
 )
-STORED AS PARQUET
-LOCATION 's3a://demo-bucket/data/customers/';
+WITH (
+  external_location = 's3a://demo-bucket/data/customers',
+  format = 'PARQUET'
+);
 
--- products table
-CREATE TABLE IF NOT EXISTS demo.products (
+CREATE TABLE IF NOT EXISTS hive.demo.products (
   product_id BIGINT,
-  name       STRING,
-  category   STRING
+  name       VARCHAR,
+  category   VARCHAR
 )
-STORED AS PARQUET
-LOCATION 's3a://demo-bucket/data/products/';
+WITH (
+  external_location = 's3a://demo-bucket/data/products',
+  format = 'PARQUET'
+);
